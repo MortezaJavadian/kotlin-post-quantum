@@ -46,5 +46,8 @@ local.properties
 # macOS
 .DS_Store
 
-# Test vectors fetched by scripts/ — large, pinned upstream, never committed here.
-src/test/resources/vectors/acvp/
+# Test vectors, fetched by scripts/fetch-vectors.sh from pinned upstream commits — 63 MB of
+# gzipped ACVP and Wycheproof JSON. Deliberately not committed: they are large, they are not this
+# project's to redistribute, and a checked-in copy is a copy that can be edited until it agrees with
+# the implementation. Re-fetching from the pin is what makes the run reproducible.
+test-vectors/
