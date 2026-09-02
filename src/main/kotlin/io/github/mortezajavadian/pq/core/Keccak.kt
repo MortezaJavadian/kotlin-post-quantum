@@ -18,26 +18,34 @@ package io.github.mortezajavadian.pq.core
  * in [finish] can only trigger for a suffix that already has its top bit set, which none of the four
  * instances here use; it is kept because it is part of the sponge's contract, not because it runs.
  *
- * **Squeezing is incremental.** [writeInto] resumes from [posOut] and permutes only when the
- * current block is exhausted, so a caller can pull an unbounded stream one rate-sized block at a
- * time. That is what `RejNTTPoly` / `SampleNTT` / `ExpandMask` need, and it is why this class exposes
- * [xofInto] separately from [digest].
+ * **Squeezing is incremental.** The squeeze resumes from [posOut] and permutes only when the current
+ * block is exhausted, so a caller can pull an unbounded stream one rate-sized block at a time. That
+ * is what `RejNTTPoly` / `SampleNTT` / `ExpandMask` need, and it is why this class exposes [xofInto]
+ * separately from [digest].
  *
  * **Lifecycle.** [digest] wipes the state on its way out and the sponge refuses further use, so the
  * key-derived material a fixed-length hash absorbs does not outlive the call. [update] after a
  * squeeze and any use after [destroy] both throw rather than quietly producing a digest over the
  * wrong data. Streaming callers, which must keep squeezing, wipe explicitly when the stream ends.
  *
+ * **Construction goes through [Sha3].** The constructor is internal, so the only way to get an
+ * instance is one of `Sha3.sha3_256()` / `sha3_512()` / `shake128(dkLen)` / `shake256(dkLen)`. The
+ * four parameters are not independent: [blockLen] must be the FIPS-202 rate that goes with [suffix]
+ * (a rate of 0 makes [update] spin forever, and one above 200 runs off the 25-lane state), and
+ * [enableXOF] must be true exactly for the SHAKE suffix. There is no combination a caller could
+ * supply that FIPS-202 defines and those four factories do not already cover, so the check is
+ * structural instead of a set of runtime guards.
+ *
  * Not thread-safe and not meant to be: a sponge is a mutable stream, and every user here owns its
  * own instance for the duration of one call.
  */
-internal class Keccak(
+public class Keccak internal constructor(
     /** Rate in bytes: 136 for SHA3-256 and SHAKE256, 168 for SHAKE128, 72 for SHA3-512. */
-    val blockLen: Int,
+    public val blockLen: Int,
     /** Domain-separation byte, `0x06` (SHA-3) or `0x1f` (SHAKE). */
     private val suffix: Int,
     /** Default digest length for [digest]; ignored by [xofInto], which is length-driven. */
-    val outputLen: Int,
+    public val outputLen: Int,
     /** SHAKE only. Guards [xofInto] so a fixed-length hash cannot be squeezed by mistake. */
     private val enableXOF: Boolean = false,
 ) {
@@ -67,7 +75,7 @@ internal class Keccak(
         }
     }
 
-    fun update(data: ByteArray): Keccak = update(data, 0, data.size)
+    public fun update(data: ByteArray): Keccak = update(data, 0, data.size)
 
     /**
      * Absorbs `data[from until to]`, XOR-ing into the rate and permuting on every full block.
@@ -76,7 +84,7 @@ internal class Keccak(
      * land on a lane boundary, which is the normal case here (a 32-byte seed followed by two
      * one-byte matrix indices).
      */
-    fun update(data: ByteArray, from: Int, to: Int): Keccak {
+    public fun update(data: ByteArray, from: Int, to: Int): Keccak {
         checkAlive(checkFinished = true)
         var p = from
         while (p < to) {
@@ -96,7 +104,7 @@ internal class Keccak(
     }
 
     /** Absorbs one byte — the nonce in ML-KEM's PRF, which is a single-byte counter. */
-    fun updateByte(value: Int): Keccak {
+    internal fun updateByte(value: Int): Keccak {
         checkAlive(checkFinished = true)
         val lane = pos ushr 3
         val shift = (pos and 7) shl 3
@@ -117,8 +125,14 @@ internal class Keccak(
         permute()
     }
 
-    /** Squeezes `out.size` bytes, continuing the stream where the previous call stopped. */
-    fun writeInto(out: ByteArray): ByteArray {
+    /**
+     * Squeezes `out.size` bytes, continuing the stream where the previous call stopped.
+     *
+     * Private, and the reason is the [enableXOF] guard: this is the raw squeeze, so a caller able to
+     * reach it could pull 1 KiB out of a SHA3-256 instance and get a well-formed but non-standard
+     * stream that no other implementation agrees with. [xofInto] is the same code behind the check.
+     */
+    private fun writeInto(out: ByteArray): ByteArray {
         checkAlive(checkFinished = false)
         finish()
         var p = 0
@@ -137,8 +151,11 @@ internal class Keccak(
         return out
     }
 
-    /** As [writeInto], refusing a non-XOF instance. */
-    fun xofInto(out: ByteArray): ByteArray {
+    /**
+     * As the raw squeeze, refusing a non-XOF instance. Fills `out` and returns it, so the caller
+     * chooses the length and may reuse one buffer across a stream.
+     */
+    public fun xofInto(out: ByteArray): ByteArray {
         if (!enableXOF) throw IllegalStateException("XOF is not possible for this instance")
         return writeInto(out)
     }
@@ -151,7 +168,7 @@ internal class Keccak(
      * through here, and the sponge state that produced it is key-derived. A caller that needs a
      * resumable stream wants [xofInto], which does not wipe.
      */
-    fun digest(): ByteArray {
+    public fun digest(): ByteArray {
         checkAlive(checkFinished = true)
         val out = writeInto(ByteArray(outputLen))
         destroy()
@@ -159,7 +176,7 @@ internal class Keccak(
     }
 
     /** Zeroes the state and marks the sponge unusable. Idempotent. */
-    fun destroy() {
+    public fun destroy() {
         destroyed = true
         state.fill(0L)
         scratch.fill(0L)

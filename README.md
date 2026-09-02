@@ -5,7 +5,7 @@ Auditable, dependency-free Kotlin implementation of NIST post-quantum cryptograp
 - 🔒 Auditable: small enough to read end to end, one commit per package, no reflection, no codegen
 - 🪶 Minimal: zero dependencies. The only imports outside `kotlin.*` are `java.math.BigInteger` and
   `java.security.SecureRandom`
-- 🔍 Reliable: 26,385 assertions against NIST's own ACVP vectors and Project Wycheproof
+- 🔍 Reliable: 26,467 assertions against NIST's own ACVP vectors and Project Wycheproof
 - 🦾 ML-KEM & CRYSTALS-Kyber: lattice-based KEM from [FIPS 203][fips203]
 - 🔋 ML-DSA & CRYSTALS-Dilithium: lattice-based signatures from [FIPS 204][fips204]
 - 🧱 FIPS 202 included: Keccak-f[1600], SHA3-256/512, SHAKE-128/256 and a seekable XOF, validated
@@ -13,9 +13,7 @@ Auditable, dependency-free Kotlin implementation of NIST post-quantum cryptograp
 - 🤖 Android from API 21: plain Java 8 bytecode, no NDK, no JCA provider, no Play Services
 
 > [!IMPORTANT]
-> Every declaration in this library is still `internal`, so a consumer taking it as a dependency
-> cannot call anything yet. See [Not a public API yet](#not-a-public-api-yet). It has not been
-> independently audited — see [Security](#security).
+> This library has not been independently audited — see [Security](#security).
 
 ### This library is a port of noble-post-quantum
 
@@ -36,21 +34,31 @@ Where it differs, it differs on purpose:
 
 ## Usage
 
-Not published to Maven Central yet. Until it is, consume it as a source dependency — a Git submodule
-plus `include(":kotlin-post-quantum")`, or Gradle's
-[composite build](https://docs.gradle.org/current/userguide/composite_builds.html):
-
 ```kotlin
-// settings.gradle.kts
-includeBuild("../kotlin-post-quantum")
+// build.gradle.kts
+dependencies {
+    implementation("io.github.mortezajavadian:kotlin-post-quantum:0.1.0")
+}
 ```
+
+```xml
+<!-- pom.xml -->
+<dependency>
+  <groupId>io.github.mortezajavadian</groupId>
+  <artifactId>kotlin-post-quantum</artifactId>
+  <version>0.1.0</version>
+</dependency>
+```
+
+Kotlin 2.0 or newer, or any JVM language — the artifact is plain Java 8 bytecode with no Kotlin-only
+signatures on the public surface. The only transitive dependency is `kotlin-stdlib`.
 
 - [ML-KEM / Kyber](#ml-kem--kyber-shared-secrets)
 - [ML-DSA / Dilithium](#ml-dsa--dilithium-signatures)
 - [K-PKE: the layer under the KEM](#k-pke-the-layer-under-the-kem)
 - [FIPS 202: SHA3 and SHAKE](#fips-202-sha3-and-shake)
 - [What should I use?](#what-should-i-use)
-- [Not a public API yet](#not-a-public-api-yet)
+- [What is public, and what is not](#what-is-public-and-what-is-not)
 - [Build](#build)
 - [Security](#security)
 - [Testing](#testing)
@@ -60,8 +68,7 @@ includeBuild("../kotlin-post-quantum")
 ### ML-KEM / Kyber shared secrets
 
 ```kotlin
-import io.github.mortezajavadian.pq.mlkem.MlKem
-import io.github.mortezajavadian.pq.mlkem.mlKem1024
+import io.github.mortezajavadian.pq.mlkem.mlKem1024   // and mlKem512, mlKem768
 
 val kem = mlKem1024                       // or MlKem(k = 3, eta1 = 2, eta2 = 2, du = 10, dv = 4)
 val alice = kem.keygen()                  // keygen(seed) takes a 64-byte seed and is deterministic
@@ -97,7 +104,7 @@ and deliberately does not verify `z`.
 ### ML-DSA / Dilithium signatures
 
 ```kotlin
-import io.github.mortezajavadian.pq.mldsa.mlDsa87
+import io.github.mortezajavadian.pq.mldsa.mlDsa87   // and mlDsa44, mlDsa65
 
 val dsa = mlDsa87
 val keys = dsa.keygen()                   // keygen(seed) takes a 32-byte seed
@@ -115,7 +122,7 @@ Lattice-based signatures, defined in [FIPS 204][fips204]
 ```kotlin
 val context = byteArrayOf(1, 2, 3)
 val sigCtx = dsa.sign(msg, keys.secretKey, context)          // verify needs the same context
-val sigDet = dsa.sign(msg, keys.secretKey, Bytes.EMPTY, ByteArray(32))  // deterministic
+val sigDet = dsa.sign(msg, keys.secretKey, extraEntropy = ByteArray(32))  // deterministic
 ```
 
 - `context` — domain separation, up to 255 bytes; must match between `sign` and `verify`, and 256
@@ -175,20 +182,42 @@ Reach for this library in the three cases the platform does not cover:
 - **Seeded keygen with exportable keys.** `keygen(seed)` is deterministic and returns the secret key
   as bytes, which is exactly what a Keystore-backed provider is built to prevent.
 
-### Not a public API yet
+### What is public, and what is not
 
-Every declaration is `internal`. That is inherited from the app this came out of, where nothing
-outside the module was meant to reach the primitives directly, and it means **a consumer taking this
-as a dependency cannot currently call anything.** The test source set can, which is what makes the
-validation below real. A public facade is required before the library is usable from outside, and it
-is deliberately not being added in the same commits that move and validate the code, so that any
-change to behaviour stays its own reviewable diff.
+All six standardised parameter sets ship as ready-made instances, and those are the intended entry
+points: `mlKem512`, `mlKem768`, `mlKem1024`, `mlDsa44`, `mlDsa65`, `mlDsa87`. The test suite drives
+these exact objects with NIST's files, not copies rebuilt from the same table — otherwise the vectors
+would prove the constructors are parameterised while saying nothing about the six values you get.
 
-Parameter sets are constructor arguments, so all six standardised sets are reachable today:
-`MlKem(k, eta1, eta2, du, dv)` for ML-KEM-512/768/1024 and `MlDsa(...)` for ML-DSA-44/65/87. Only
-`mlKem1024` and `mlDsa87` are declared as ready-made instances, because those are the two the
-originating app ships; the suite builds the other four from the same constructors, which is how it
-knows the parameterisation is real.
+The published surface is five types: `MlKem`, `MlDsa`, `Sha3`, `Keccak` and `Bytes` (`EMPTY`, `equal`,
+`clean`). Everything else is `internal`, and each exclusion is a specific hazard rather than tidiness:
+
+- **The NTT rings** — `KyberRing`, `DilithiumRing`, `Crystals`. Their `zetas` table is an `IntArray`
+  on a process-wide singleton. A public one is globally writable, and one changed twiddle factor
+  silently corrupts every later transform in the process, in every scheme, with no exception raised
+- **The bit-packing layer** — `BitPacker`, `IntCoder` and the coders. `decode`'s index arithmetic is
+  unguarded because every caller inside the library is a fixed-shape loop, and `IntCoder` is an
+  interface a third party could implement and hand back, which is a hook into the encoding of keys
+- **`Keccak`'s constructor** — reachable only through `Sha3.sha3_256()`/`sha3_512()`/`shake128()`/
+  `shake256()`. The four parameters are not independent: a rate of 0 makes `update` spin forever, one
+  above 200 runs off the 25-lane state, and a SHAKE suffix without the XOF flag is a sponge no other
+  implementation agrees with. `writeInto` is private for the same reason — it squeezes past the length
+  the digest was built for
+- **`MlDsa`'s constructor** — four of its ten numbers are fixed across every standardised set and
+  `gamma2` must be one of two values that cannot be named from outside; a wrong one selects a
+  *different scheme* rather than a misconfigured one. `MlKem`'s constructor is public because FIPS 203
+  Table 2's five parameters really are five free numbers, but it is unvalidated: `dv = 5` where the
+  set says 4 is a self-consistent scheme that interoperates with nothing
+- **`encapsulate(publicKey, msg)`** — `msg` is the 32 bytes of *randomness* that determine the shared
+  secret outright, and nothing in the name says so. `encapsulate(pk, "a 32-byte string".toByteArray())`
+  round-trips perfectly and hands the session key to whoever guesses the string
+- **`Bytes.random`** — with its `SecureRandom` private. See [Security](#security): there is no seam to
+  substitute the randomness, and publishing `Bytes` does not add one
+
+`src/main` compiles under `explicitApi()`, so an addition with no visibility modifier does not compile
+rather than becoming API by default. The acceptance test for all of the above is a consumer module
+built with a different `-module-name` and no `-Xfriend-paths`: every snippet in this README compiles
+and runs there, and each hidden entry point above fails to.
 
 ### Build
 
@@ -199,6 +228,11 @@ knows the parameterisation is real.
 JDK 17 toolchain, Java 8 bytecode, Gradle wrapper committed. There is nothing to configure and no
 native step: `src/main` is nine files of plain Kotlin whose only non-`kotlin.*` imports are
 `java.security.SecureRandom` in `core/Bytes.kt` and `java.math.BigInteger` in `lattice/Crystals.kt`.
+
+The build also enforces two things worth knowing about before you send a patch: `explicitApi()`, so a
+declaration with no visibility modifier does not compile, and `-Xjdk-release=1.8` on the published
+compilation, so a call to a Java 9+ method is a compile error here instead of a `NoSuchMethodError` on
+someone's Android 5 device.
 
 ### Security
 
@@ -217,6 +251,10 @@ What is deliberate:
   not short-circuit on the first difference
 - **BigInteger touches no secret.** It appears once, computing the NTT root-of-unity table at
   construction from public constants; every operation on key or message material is `Int` arithmetic
+- **The dangerous surface is not published.** The mutable NTT tables, the unguarded bit-packing layer,
+  `Keccak`'s raw constructor and the two entry points that take randomness for a message are all
+  `internal` — see [What is public, and what is not](#what-is-public-and-what-is-not) for the reason
+  behind each one
 
 What is not claimed:
 
@@ -255,10 +293,10 @@ pass — a cap that announces itself in the output rather than silently shrinkin
 The current run, with `PQ_REQUIRE_VECTORS=1`:
 
 ```
-61 passed, 0 failed, 0 skipped — 26385 assertions
+62 passed, 0 failed, 0 skipped — 26467 assertions
 ```
 
-7 suites, 61 cases. Two of them run no vector file — the JSON reader written for this project, because
+7 suites, 62 cases. Two of them run no vector file — the JSON reader written for this project, because
 ACVP's SHAKE prompt is hundreds of megabytes and has to be streamed rather than parsed into memory, and
 the port of noble's `basic.test.ts`. The other five walk the files:
 
@@ -308,7 +346,9 @@ A validation suite whose failure mode is *passing* is worse than none. So:
 - **A missing vector file is *skipped*, never passed** — and `PQ_REQUIRE_VECTORS=1` makes it a failure
 - **The suite always runs.** `test-vectors/` is not a declared Gradle input, so an up-to-date check
   would let `./gradlew test` reprint a previous run's green summary after fetching a newer pin.
-  `outputs.upToDateWhen { false }` removes that possibility
+  `outputs.upToDateWhen { false }` removes that possibility — and `outputs.cacheIf { false }` closes
+  the second door, since `Test` is a `@CacheableTask` and the build cache is consulted *after* the
+  up-to-date check fails, restoring the same false green without executing anything
 - **Two front ends over one body of cases.** `./gradlew test` and `./gradlew vectors` share every suite,
   case and assertion; they can only disagree if the harness is broken
 
@@ -341,7 +381,7 @@ ML-DSA, in bytes. `keygen(seed)` takes 32 (`ξ`), and signature length is fixed,
 | ML-DSA-65 | 1952 | 4032 | 3309 |
 | ML-DSA-87 | 2592 | 4896 | 4627 |
 
-Source: nine Kotlin files, 2,104 lines with comments; the suite that validates them is 2,477. No
+Source: nine Kotlin files, 2,348 lines with comments; the suite that validates them is 2,540. No
 generated code, no reflection, nothing to strip in a release build.
 
 ### License

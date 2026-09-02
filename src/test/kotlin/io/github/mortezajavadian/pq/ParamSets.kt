@@ -1,43 +1,33 @@
 package io.github.mortezajavadian.pq
 
-import io.github.mortezajavadian.pq.mldsa.GAMMA2_1
-import io.github.mortezajavadian.pq.mldsa.GAMMA2_2
 import io.github.mortezajavadian.pq.mldsa.MlDsa
-import io.github.mortezajavadian.pq.mldsa.mlDsa87
 import io.github.mortezajavadian.pq.mlkem.MlKem
-import io.github.mortezajavadian.pq.mlkem.mlKem1024
 
 /**
  * All six standardised parameter sets, so the suite validates the whole of FIPS 203 and FIPS 204
  * and not only the two rows the originating app ships.
  *
- * The library declares ready-made `mlKem1024` and `mlDsa87` instances because those are what that
- * app uses; the other four are built here from the same constructors, with the values read straight
- * off FIPS 203 Table 2 and FIPS 204 Table 1. Building them in the test rather than the library is
- * deliberate — it proves the constructors really are parameterised, which is the claim the README
- * makes, and it keeps the library's surface to what its consumer needs.
+ * Every one of them is the library's own instance — `mlKem512/768/1024` and `mlDsa44/65/87` as
+ * published, not a copy built here from the same table. That is the point: if the vectors passed
+ * against locally constructed instances, they would prove the constructors are parameterised while
+ * saying nothing about the six values a consumer actually gets. NIST's own files now check the shipped
+ * objects.
  */
 internal object Params {
     /** FIPS 203 Table 2: `k=2, η1=3, η2=2, du=10, dv=4`; sizes 800 / 1632 / 768. */
-    val mlKem512: MlKem = MlKem(k = 2, eta1 = 3, eta2 = 2, du = 10, dv = 4)
+    val mlKem512: MlKem = io.github.mortezajavadian.pq.mlkem.mlKem512
 
     /** FIPS 203 Table 2: `k=3, η1=2, η2=2, du=10, dv=4`; sizes 1184 / 2400 / 1088. */
-    val mlKem768: MlKem = MlKem(k = 3, eta1 = 2, eta2 = 2, du = 10, dv = 4)
+    val mlKem768: MlKem = io.github.mortezajavadian.pq.mlkem.mlKem768
 
     /** FIPS 203 Table 2: `k=4, η1=2, η2=2, du=11, dv=5`; sizes 1568 / 3168 / 1568. */
     val mlKem1024: MlKem = io.github.mortezajavadian.pq.mlkem.mlKem1024
 
     /** FIPS 204 Table 1, category 2: `k=4, ℓ=4, γ1=2^17, γ2=(q−1)/88, τ=39, η=2, ω=80`. */
-    val mlDsa44: MlDsa = MlDsa(
-        k = 4, l = 4, gamma1 = 1 shl 17, gamma2 = GAMMA2_1, tau = 39,
-        eta = 2, omega = 80, cTildeBytes = 32, crhBytes = 64, trBytes = 64,
-    )
+    val mlDsa44: MlDsa = io.github.mortezajavadian.pq.mldsa.mlDsa44
 
     /** FIPS 204 Table 1, category 3: `k=6, ℓ=5, γ1=2^19, γ2=(q−1)/32, τ=49, η=4, ω=55`. */
-    val mlDsa65: MlDsa = MlDsa(
-        k = 6, l = 5, gamma1 = 1 shl 19, gamma2 = GAMMA2_2, tau = 49,
-        eta = 4, omega = 55, cTildeBytes = 48, crhBytes = 64, trBytes = 64,
-    )
+    val mlDsa65: MlDsa = io.github.mortezajavadian.pq.mldsa.mlDsa65
 
     /** FIPS 204 Table 1, category 5: `k=8, ℓ=7, γ1=2^19, γ2=(q−1)/32, τ=60, η=2, ω=75`. */
     val mlDsa87: MlDsa = io.github.mortezajavadian.pq.mldsa.mlDsa87

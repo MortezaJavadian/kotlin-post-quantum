@@ -97,8 +97,14 @@ private fun compressCoder(d: Int): IntCoder = if (d >= 12) ByteCoder12 else Comp
  *
  * Instances are immutable after construction; every method allocates its own working polynomials, so
  * one shared instance per parameter set is safe on any thread.
+ *
+ * The three standardised sets ship as [mlKem512], [mlKem768] and [mlKem1024] — prefer them. The
+ * constructor is public because FIPS-203 Table 2's five parameters map onto it one-for-one with
+ * nothing derived, so a set from a draft or a research variant is expressible; it is also unvalidated,
+ * and a plausible-looking typo (`dv = 5` where the set says 4) yields a self-consistent scheme that
+ * simply is not ML-KEM and interoperates with nothing.
  */
-internal class MlKem(
+public class MlKem(
     private val k: Int,
     private val eta1: Int,
     private val eta2: Int,
@@ -119,22 +125,33 @@ internal class MlKem(
     private val polyV = BitPacker(dv, compressCoder(dv), n)
 
     /** `384k + 32` — the encoded `t̂` vector followed by the matrix seed ρ. */
-    val publicKeyLen: Int = k * poly12.bytesLen + 32
+    public val publicKeyLen: Int = k * poly12.bytesLen + 32
 
     /** `384k` — K-PKE's secret key is just the encoded `ŝ`. */
-    val kpkeSecretKeyLen: Int = k * poly12.bytesLen
+    public val kpkeSecretKeyLen: Int = k * poly12.bytesLen
 
     /** `32(du·k + dv)`. */
-    val cipherTextLen: Int = k * polyU.bytesLen + polyV.bytesLen
+    public val cipherTextLen: Int = k * polyU.bytesLen + polyV.bytesLen
 
     /** `768k + 96` — `dkPKE || ek || H(ek) || z`. */
-    val secretKeyLen: Int = kpkeSecretKeyLen + publicKeyLen + 32 + 32
+    public val secretKeyLen: Int = kpkeSecretKeyLen + publicKeyLen + 32 + 32
 
-    /** Encapsulation output. [sharedSecret] is 32 bytes; [cipherText] is [cipherTextLen]. */
-    class Encapsulated(val cipherText: ByteArray, val sharedSecret: ByteArray)
+    /**
+     * Encapsulation output. [sharedSecret] is 32 bytes; [cipherText] is [cipherTextLen].
+     *
+     * Holds the arrays, does not copy them. [sharedSecret] is key material: pass it to a KDF and then
+     * `Bytes.clean` it. Not a `data class` on purpose — a generated `equals` would compare byte arrays
+     * by identity and read as a content comparison.
+     */
+    public class Encapsulated(public val cipherText: ByteArray, public val sharedSecret: ByteArray)
 
-    /** A keypair, in the encodings the wire and the key store use. */
-    class KeyPair(val publicKey: ByteArray, val secretKey: ByteArray)
+    /**
+     * A keypair, in the encodings the wire and the key store use.
+     *
+     * Holds the arrays, does not copy them; [secretKey] is live key material until you wipe it. Not a
+     * `data class`, for the reason in [Encapsulated].
+     */
+    public class KeyPair(public val publicKey: ByteArray, public val secretKey: ByteArray)
 
     // -------------------------------------------------------------------------------------------
     // Ring operations
@@ -267,8 +284,11 @@ internal class MlKem(
      * `(j, i)`, there `(i, j)`. That asymmetry is the spec's and is what makes `t̂` and the
      * ciphertext's `u` agree; swapping it produces a self-consistent keypair that no correct peer can
      * talk to.
+     *
+     * `seed` must come from a CSPRNG and must never be reused: it *is* the private key, and anyone
+     * holding it reproduces this keypair exactly. The array is the caller's — wipe it.
      */
-    fun kpkeKeygen(seed: ByteArray): KeyPair {
+    public fun kpkeKeygen(seed: ByteArray): KeyPair {
         Bytes.requireSize(seed, 32, "seed")
         val seedDst = ByteArray(33)
         seed.copyInto(seedDst)
@@ -314,8 +334,13 @@ internal class MlKem(
      * `u ← NTT⁻¹(Âᵀ ∘ r̂) + e₁`, `v ← NTT⁻¹(t̂ᵀ ∘ r̂) + e₂ + Decompress₁(m)`, then both are lossily
      * compressed to `du` and `dv` bits. The compression is why decryption is only *approximately*
      * inverse and why the KEM re-encrypts to check.
+     *
+     * The determinism cuts both ways: [seed] is the encryption's only entropy, so it must be 32 fresh
+     * CSPRNG bytes per `(publicKey, msg)` unless reproducibility is the point. Encrypting two different
+     * messages under one key with the same seed publishes their difference — the noise cancels and
+     * `v₁ - v₂` decompresses to `m₁ ⊕ m₂`.
      */
-    fun kpkeEncrypt(publicKey: ByteArray, msg: ByteArray, seed: ByteArray): ByteArray {
+    public fun kpkeEncrypt(publicKey: ByteArray, msg: ByteArray, seed: ByteArray): ByteArray {
         Bytes.requireSize(publicKey, publicKeyLen, "publicKey")
         Bytes.requireSize(msg, 32, "message")
         // FIPS-203 Algorithm 14 fixes `r ∈ B³²`, and SHAKE would absorb any width without complaint,
@@ -369,8 +394,12 @@ internal class MlKem(
      * `m ← Compress₁(v − NTT⁻¹(ŝᵀ ∘ û))`. The 1-bit compression is what absorbs the noise the
      * ciphertext's `du`/`dv` truncation left behind: each coefficient is rounded to whichever of `0`
      * or `⌈q/2⌉` it is nearer, so a small perturbation cannot change the recovered bit.
+     *
+     * K-PKE is IND-CPA only, and this is where that bites: a tampered ciphertext decrypts to a
+     * different message instead of failing, so exposing it to an attacker who learns anything about the
+     * result turns it into a chosen-ciphertext oracle. [decapsulate] is the CCA-secure wrapper.
      */
-    fun kpkeDecrypt(cipherText: ByteArray, secretKey: ByteArray): ByteArray {
+    public fun kpkeDecrypt(cipherText: ByteArray, secretKey: ByteArray): ByteArray {
         Bytes.requireSize(cipherText, cipherTextLen, "cipherText")
         // Two widths are legal because two callers are: a K-PKE caller passes `dkPKE` alone, while
         // [decapsulate] passes the whole ML-KEM secret key and this reads its leading `384k` bytes.
@@ -408,8 +437,12 @@ internal class MlKem(
      *
      * The seed belongs to the caller and is left untouched; the 32-byte K-PKE half this copies out of
      * it is wiped before returning.
+     *
+     * Deterministic, so the seed carries the whole keypair's secrecy: 64 CSPRNG bytes, never reused,
+     * wiped once it has been used. Use [keygen] with no argument unless you are deriving a key from
+     * something you already store.
      */
-    fun keygen(seed: ByteArray): KeyPair {
+    public fun keygen(seed: ByteArray): KeyPair {
         Bytes.requireSize(seed, 64, "seed")
         val kpkeSeed = seed.copyOfRange(0, 32)
         val inner = kpkeKeygen(kpkeSeed)
@@ -434,7 +467,7 @@ internal class MlKem(
      * Separate from the seeded overload rather than a default argument so the generated seed can be
      * wiped once the key is built — a default expression would leave it live in the caller's frame.
      */
-    fun keygen(): KeyPair {
+    public fun keygen(): KeyPair {
         val seed = Bytes.random(64)
         try {
             return keygen(seed)
@@ -448,15 +481,21 @@ internal class MlKem(
      *
      * `(K, r) ← G(m || H(ek))` derives both the secret and the encryption randomness from the
      * message, so the ciphertext is a deterministic function of `(ek, m)` and the peer can re-derive
-     * it during decapsulation. [msg] defaults to 32 fresh random bytes and should only be supplied by
-     * a test.
+     * it during decapsulation.
      *
      * The modulus round-trip before it is FIPS-203 §7.2's input check, and it is a real check rather
      * than a formality: [ByteCoder12]'s decode reduces each 12-bit word mod `q`, so a word in
      * `[q, 4095]` re-encodes to something else and the comparison fails. It would also catch a
      * truncated or padded public key.
+     *
+     * Internal on purpose. [msg] is the 32 bytes of *randomness* `m` — it is not a payload, and it
+     * determines the shared secret outright — but nothing about `encapsulate(publicKey, msg)` says so,
+     * and `encapsulate(pk, "a 32-byte string".toByteArray())` round-trips perfectly while handing the
+     * session key to anyone who guesses the string. The one-argument [encapsulate] is the KEM. For real
+     * encryption use [kpkeEncrypt], which takes a message *and* separate coins; for a reproducible
+     * keypair use [keygen] with a seed; ACVP's specified-`m` vectors reach this from the test module.
      */
-    fun encapsulate(publicKey: ByteArray, msg: ByteArray): Encapsulated {
+    internal fun encapsulate(publicKey: ByteArray, msg: ByteArray): Encapsulated {
         Bytes.requireSize(publicKey, publicKeyLen, "publicKey")
         Bytes.requireSize(msg, 32, "message")
         val encodedLen = k * poly12.bytesLen
@@ -480,13 +519,16 @@ internal class MlKem(
     }
 
     /**
-     * As [encapsulate], with a freshly generated message.
+     * `ML-KEM.Encaps` against [publicKey], with the message generated internally.
      *
-     * This is the form every caller uses. Split from the explicit-message overload rather than
-     * expressed as a default argument so the message — which determines the shared secret outright —
-     * can be wiped as soon as the ciphertext exists instead of being left live in the caller's frame.
+     * This is the KEM: it draws 32 CSPRNG bytes, derives the shared secret and the encryption
+     * randomness from them, wipes them, and hands back the secret and the ciphertext. Nothing about the
+     * randomness is a parameter, which is the point — see the internal overload for why. Applies
+     * FIPS-203 §7.2's modulus check to [publicKey] and throws if it fails.
+     *
+     * The returned [Encapsulated.sharedSecret] is live key material.
      */
-    fun encapsulate(publicKey: ByteArray): Encapsulated {
+    public fun encapsulate(publicKey: ByteArray): Encapsulated {
         val msg = Bytes.random(32)
         try {
             return encapsulate(publicKey, msg)
@@ -506,8 +548,11 @@ internal class MlKem(
      *
      * Both candidates are computed unconditionally and the loser is wiped, so which branch was taken
      * is not visible in allocation or timing.
+     *
+     * It does throw on one input: a [secretKey] whose embedded `H(ek)` does not match the public key it
+     * carries, which is §7.3's check and a malformed key rather than a wrong one.
      */
-    fun decapsulate(cipherText: ByteArray, secretKey: ByteArray): ByteArray {
+    public fun decapsulate(cipherText: ByteArray, secretKey: ByteArray): ByteArray {
         Bytes.requireSize(secretKey, secretKeyLen, "secretKey")
         Bytes.requireSize(cipherText, cipherTextLen, "cipherText")
         val encodedLen = k * poly12.bytesLen
@@ -536,6 +581,18 @@ internal class MlKem(
     }
 }
 
-/** ML-KEM-1024 — FIPS-203's 256-bit-security parameter set, the only one this app uses. */
-internal val mlKem1024: MlKem = MlKem(k = 4, eta1 = 2, eta2 = 2, du = 11, dv = 5)
+/**
+ * ML-KEM-512 — FIPS-203 Table 2, category-1 security. `k = 2`.
+ *
+ * The three sets differ only in these five numbers, and the numbers are not interchangeable: the
+ * `seed || k` domain separation in [MlKem.kpkeKeygen] means one seed gives three unrelated keypairs, so
+ * a peer on a different set does not interoperate — it fails on a length check, not silently.
+ */
+public val mlKem512: MlKem = MlKem(k = 2, eta1 = 3, eta2 = 2, du = 10, dv = 4)
+
+/** ML-KEM-768 — FIPS-203 Table 2, category-3 security. `k = 3`. The usual default. */
+public val mlKem768: MlKem = MlKem(k = 3, eta1 = 2, eta2 = 2, du = 10, dv = 4)
+
+/** ML-KEM-1024 — FIPS-203 Table 2, category-5 security. `k = 4`. */
+public val mlKem1024: MlKem = MlKem(k = 4, eta1 = 2, eta2 = 2, du = 11, dv = 5)
 

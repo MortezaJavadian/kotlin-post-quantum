@@ -29,8 +29,15 @@ import io.github.mortezajavadian.pq.lattice.IdentityCoder
  *
  * Instances are immutable; every method allocates its own working polynomials, so one shared instance
  * per parameter set is safe on any thread.
+ *
+ * Use [mlDsa44], [mlDsa65] or [mlDsa87]. The constructor is internal, unlike ML-KEM's: four of these
+ * ten numbers are not free — `crhBytes` and `trBytes` are 64 in every standardised set, `cTildeBytes`
+ * is `2λ/8`, and `gamma2` must be one of the two `(q−1)/88` and `(q−1)/32` values that live in
+ * [DilithiumRing] and cannot be named from outside this module — while the rest silently select a
+ * *different scheme* rather than a misconfigured one. FIPS-204 Table 1 has exactly three rows and all
+ * three ship above.
  */
-internal class MlDsa(
+public class MlDsa internal constructor(
     private val k: Int,
     private val l: Int,
     private val gamma1: Int,
@@ -60,22 +67,29 @@ internal class MlDsa(
     private val w1Packer = BitPacker(if (gamma2 == GAMMA2_1) 6 else 4, IdentityCoder, n)
 
     /** `32 + 320k` — ρ followed by the packed `t1` vector; 2592 bytes at ML-DSA-87. */
-    val publicKeyLen: Int = 32 + k * t1Packer.bytesLen
+    public val publicKeyLen: Int = 32 + k * t1Packer.bytesLen
 
     /** `ρ || K || tr || s1 || s2 || t0`; 4896 bytes at ML-DSA-87. */
-    val secretKeyLen: Int =
+    public val secretKeyLen: Int =
         32 + 32 + trBytes + l * etaPacker.bytesLen + k * etaPacker.bytesLen + k * t0Packer.bytesLen
 
-    /** `c̃ || z || h`; 4627 bytes at ML-DSA-87. */
-    val signatureLen: Int = cTildeBytes + l * zPacker.bytesLen + omega + k
+    /** `c̃ || z || h`; 4627 bytes at ML-DSA-87. Fixed, not variable. */
+    public val signatureLen: Int = cTildeBytes + l * zPacker.bytesLen + omega + k
 
     /** Seed accepted by [keygen], and the per-signature randomness length. */
-    val seedLen: Int = 32
+    public val seedLen: Int = 32
 
     private val zVecLen = l * zPacker.bytesLen
     private val w1VecLen = k * w1Packer.bytesLen
 
-    class KeyPair(val publicKey: ByteArray, val secretKey: ByteArray)
+    /**
+     * A keypair, in the FIPS-204 encodings.
+     *
+     * Holds the arrays, does not copy them; [secretKey] is live key material until you wipe it. Not a
+     * `data class` — a generated `equals` would compare byte arrays by identity while reading as a
+     * content comparison.
+     */
+    public class KeyPair(public val publicKey: ByteArray, public val secretKey: ByteArray)
 
     // -------------------------------------------------------------------------------------------
     // Ring operations
@@ -370,8 +384,11 @@ internal class MlDsa(
      *
      * The seed belongs to the caller and is left untouched. Everything derived from it — ρ, ρ′, K, the
      * secret vectors and their NTT images — is wiped before returning.
+     *
+     * Deterministic, so the seed *is* the private key: 32 CSPRNG bytes, never reused across keys, wiped
+     * once used. Use [keygen] with no argument unless you are deriving a key from stored material.
      */
-    fun keygen(seed: ByteArray): KeyPair {
+    public fun keygen(seed: ByteArray): KeyPair {
         Bytes.requireSize(seed, seedLen, "seed")
         val seedDst = ByteArray(34)
         seed.copyInto(seedDst)
@@ -438,7 +455,7 @@ internal class MlDsa(
      * The generated seed is wiped once the key exists, which a default argument could not do — it
      * would leave the 32 bytes that reproduce the whole private key live in the caller's frame.
      */
-    fun keygen(): KeyPair {
+    public fun keygen(): KeyPair {
         val seed = Bytes.random(seedLen)
         try {
             return keygen(seed)
@@ -485,8 +502,14 @@ internal class MlDsa(
      * parameters — and κ advances by `l` on every attempt, so the mask is fresh each time. There is no
      * iteration cap because a bound that could be hit would be a correctness bug: the loop terminates
      * with probability 1 and the reference has no cap either.
+     *
+     * FIPS-204 §5.4 exposes this only "for testing and validation"; the same warning applies here. It
+     * is *not* [sign] without a context — it signs the bytes you hand it, so a service that will sign an
+     * arbitrary message with this becomes a forgery oracle for the real API: `signInternal(00 00 X)`
+     * *is* a valid `sign(X)` under the empty context. Use it to drive ACVP's internal-interface vectors,
+     * or when you build FIPS-204's §5 envelope yourself. Otherwise use [sign].
      */
-    fun signInternal(
+    public fun signInternal(
         msg: ByteArray,
         secretKey: ByteArray,
         extraEntropy: ByteArray? = null,
@@ -648,8 +671,12 @@ internal class MlDsa(
      * it. Equality with the transmitted `c̃` is the signature. The two norm checks and the ω budget are
      * FIPS-204's additional conditions and are applied even though a well-formed signature always
      * satisfies them.
+     *
+     * As with [signInternal], FIPS-204 §5.4 means this for testing and validation. It verifies bare
+     * bytes, so it accepts the `00 00 X` envelope [verify] builds as a plain message — which is exactly
+     * how a `signInternal` oracle turns into forged `sign` signatures. Prefer [verify].
      */
-    fun verifyInternal(sig: ByteArray, msg: ByteArray, publicKey: ByteArray): Boolean {
+    public fun verifyInternal(sig: ByteArray, msg: ByteArray, publicKey: ByteArray): Boolean {
         Bytes.requireSize(publicKey, publicKeyLen, "publicKey")
         val rho = publicKey.copyOfRange(0, 32)
         val t1 = t1Packer.decodeVec(publicKey, 32, k)
@@ -703,9 +730,14 @@ internal class MlDsa(
      *
      * The envelope is the difference between this and [signInternal], and it is mandatory: FIPS-204's
      * §5 API is defined over the prefixed message, so a signature made over the bare bytes verifies
-     * against nothing. With the empty context used throughout this app the prefix is `00 00`.
+     * against nothing. With the empty context the prefix is the two bytes `00 00`.
+     *
+     * `context` is domain separation, up to 255 bytes; it must match at [verify], and 256 bytes throws
+     * rather than being truncated. `extraEntropy` is the per-signature `rnd`: left null it is 32 fresh
+     * random bytes (hedged signing, the default), and 32 zero bytes gives FIPS-204 §3.4's deterministic
+     * variant. A verifier cannot tell which was used.
      */
-    fun sign(
+    public fun sign(
         msg: ByteArray,
         secretKey: ByteArray,
         context: ByteArray = Bytes.EMPTY,
@@ -717,8 +749,13 @@ internal class MlDsa(
         return sig
     }
 
-    /** Verifies against the same `0x00 || len(ctx) || ctx || msg` envelope [sign] produces. */
-    fun verify(
+    /**
+     * Verifies against the same `0x00 || len(ctx) || ctx || msg` envelope [sign] produces.
+     *
+     * `false` is every cryptographic and structural rejection; a wrong-length [publicKey] or a
+     * `context` over 255 bytes throws, both being caller errors rather than failed verifications.
+     */
+    public fun verify(
         sig: ByteArray,
         msg: ByteArray,
         publicKey: ByteArray,
@@ -726,8 +763,42 @@ internal class MlDsa(
     ): Boolean = verifyInternal(sig, Bytes.signedMessage(msg, context), publicKey)
 }
 
-/** ML-DSA-87 — FIPS-204's 256-bit-security parameter set, the only one this app uses. */
-internal val mlDsa87: MlDsa = MlDsa(
+/**
+ * ML-DSA-44 — FIPS-204 Table 1, category-2 security. `(k, l) = (4, 4)`, λ = 128.
+ *
+ * The three sets are not interchangeable: the `seed || k || l` domain separation in [MlDsa.keygen]
+ * means one seed gives three unrelated keypairs, and [MlDsa.signatureLen] differs, so a mismatched
+ * verifier rejects on length rather than silently.
+ */
+public val mlDsa44: MlDsa = MlDsa(
+    k = 4,
+    l = 4,
+    gamma1 = 1 shl 17,
+    gamma2 = GAMMA2_1,
+    tau = 39,
+    eta = 2,
+    omega = 80,
+    cTildeBytes = 32,
+    crhBytes = 64,
+    trBytes = 64,
+)
+
+/** ML-DSA-65 — FIPS-204 Table 1, category-3 security. `(k, l) = (6, 5)`, λ = 192. The usual default. */
+public val mlDsa65: MlDsa = MlDsa(
+    k = 6,
+    l = 5,
+    gamma1 = 1 shl 19,
+    gamma2 = GAMMA2_2,
+    tau = 49,
+    eta = 4,
+    omega = 55,
+    cTildeBytes = 48,
+    crhBytes = 64,
+    trBytes = 64,
+)
+
+/** ML-DSA-87 — FIPS-204 Table 1, category-5 security. `(k, l) = (8, 7)`, λ = 256. */
+public val mlDsa87: MlDsa = MlDsa(
     k = 8,
     l = 7,
     gamma1 = 1 shl 19,
