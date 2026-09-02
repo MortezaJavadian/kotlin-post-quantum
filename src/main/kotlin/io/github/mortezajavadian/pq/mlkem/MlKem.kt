@@ -4,7 +4,6 @@ import io.github.mortezajavadian.pq.core.Bytes
 import io.github.mortezajavadian.pq.core.Sha3
 import io.github.mortezajavadian.pq.lattice.BitPacker
 import io.github.mortezajavadian.pq.lattice.Crystals
-import io.github.mortezajavadian.pq.lattice.IdentityCoder
 import io.github.mortezajavadian.pq.lattice.IntCoder
 
 /**
@@ -38,7 +37,7 @@ internal object KyberRing : Crystals(
  * to zero and the wrap is part of the format.
  *
  * `decode` is `round(q · i / 2^d)`, exact integer arithmetic already. For `d >= 12` there is nothing
- * to compress, so [IdentityCoder] is used instead of this class.
+ * to compress and [ByteCoder12] is used instead of this class.
  */
 private class Compress(private val d: Int) : IntCoder {
     private val half = 1 shl (d - 1)
@@ -51,8 +50,31 @@ private class Compress(private val d: Int) : IntCoder {
     override fun decode(value: Int): Int = (value * KyberRing.q + half) ushr d
 }
 
-/** [Compress] for `d < 12`, identity above — `Compress_12` is the identity by definition. */
-private fun compressCoder(d: Int): IntCoder = if (d >= 12) IdentityCoder else Compress(d)
+/**
+ * FIPS-203 §4.2.1 `ByteEncode_12` / `ByteDecode_12` — the raw 12-bit field, not compression.
+ *
+ * `decode` is where the whole of §7.2's modulus check lives, and it is one line: `Algorithm 6`
+ * takes the packed word `mod m` with `m = q` when `d = 12` (`m = 2^d` only for `d < 12`), so a
+ * 12-bit word at or above `q` is *not* a coefficient and does not survive the reduction. Since a
+ * masked 12-bit word is at most 4095 and `4095 − 3329 = 766 < q`, one conditional subtraction is
+ * that reduction exactly.
+ *
+ * Dropping it would be invisible in every valid operation — an honest key's coefficients are already
+ * in `[0, q)` — and would silently turn §7.2's `ByteEncode_12(ByteDecode_12(ek)) == ek` test into a
+ * tautology, since re-encoding twelve unreduced bits returns them unchanged. A malformed
+ * encapsulation key would then be accepted, which is both a standards deviation and, because these
+ * keys arrive from the wire, protocol-visible. It is checked directly by
+ * `ML-KEM accepts q−1 and rejects q` in the basic suite and by ACVP's `encapsulationKeyCheck`
+ * vectors.
+ */
+private object ByteCoder12 : IntCoder {
+    override fun encode(value: Int): Int = value
+
+    override fun decode(value: Int): Int = if (value >= KyberRing.q) value - KyberRing.q else value
+}
+
+/** [Compress] for `d < 12`, [ByteCoder12] above — `Compress_12` is the identity, `ByteDecode_12` is not. */
+private fun compressCoder(d: Int): IntCoder = if (d >= 12) ByteCoder12 else Compress(d)
 
 /**
  * ML-KEM (FIPS-203, a.k.a. CRYSTALS-Kyber): key encapsulation, plus the raw K-PKE layer underneath
@@ -414,10 +436,10 @@ internal class MlKem(
      * it during decapsulation. [msg] defaults to 32 fresh random bytes and should only be supplied by
      * a test.
      *
-     * The modulus round-trip before it is FIPS-203 §7.2's input check. Under the 12-bit identity
-     * field coder used here it cannot fail — decoding and re-encoding twelve raw bits is the identity
-     * — but it is kept because it is the spec's step and because it is what would catch a truncated
-     * or padded public key if the field width ever changed.
+     * The modulus round-trip before it is FIPS-203 §7.2's input check, and it is a real check rather
+     * than a formality: [ByteCoder12]'s decode reduces each 12-bit word mod `q`, so a word in
+     * `[q, 4095]` re-encodes to something else and the comparison fails. It would also catch a
+     * truncated or padded public key.
      */
     fun encapsulate(publicKey: ByteArray, msg: ByteArray): Encapsulated {
         Bytes.requireSize(publicKey, publicKeyLen, "publicKey")

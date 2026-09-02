@@ -6,10 +6,10 @@ import io.github.mortezajavadian.pq.core.Bytes
  * The map between a polynomial coefficient and its packed bit-field representation.
  *
  * Every key, ciphertext and signature in both schemes is a sequence of polynomials packed at `d`
- * bits per coefficient, where `d` and the per-coefficient transform differ by field: 12 bits raw for
- * an ML-KEM public key, 11 and 5 bits *lossily compressed* for its ciphertext, 3 bits offset by η
- * for an ML-DSA secret, 20 bits signed-centred for its response. Separating "how many bits" from
- * "what the value means" is what lets one packer serve all of them.
+ * bits per coefficient, where `d` and the per-coefficient transform differ by field: 12 bits taken
+ * mod `q` for an ML-KEM public key, 11 and 5 bits *lossily compressed* for its ciphertext, 3 bits
+ * offset by η for an ML-DSA secret, 20 bits signed-centred for its response. Separating "how many
+ * bits" from "what the value means" is what lets one packer serve all of them.
  */
 internal interface IntCoder {
     /** Coefficient → field value. */
@@ -19,7 +19,13 @@ internal interface IntCoder {
     fun decode(value: Int): Int
 }
 
-/** The identity map, for fields stored verbatim (ML-KEM's 12-bit key, ML-DSA's `t1` and `w1`). */
+/**
+ * The identity map, for fields stored verbatim: ML-DSA's `t1` and `w1`, whose 10-, 6- and 4-bit
+ * words are already the coefficient.
+ *
+ * ML-KEM's 12-bit field looks like this one and is not — `ByteDecode_12` reduces mod `q`. See
+ * `ByteCoder12` in the ML-KEM sources.
+ */
 internal object IdentityCoder : IntCoder {
     override fun encode(value: Int): Int = value
     override fun decode(value: Int): Int = value
