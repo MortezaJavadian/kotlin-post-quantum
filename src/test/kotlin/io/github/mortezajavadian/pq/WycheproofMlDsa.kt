@@ -40,14 +40,22 @@ internal val wycheproofMlDsaSuite: Suite = suite("Wycheproof ML-DSA") {
             requiringVectors {
                 eachGroupCase("mldsa_${level}_verify_test") { g, t, at ->
                     val pk = g.hex("publicKey")
-                    // A malformed signature must be rejected, not raise: the signature is the
-                    // attacker-controlled input, so `verify` returning false and `verify` throwing
-                    // are the same verdict to a caller that wrote try/catch — and different to one
-                    // that did not.
-                    val valid = try {
-                        dsa.verify(t.hex("sig"), t.hex("msg"), pk, t.hexOrNull("ctx") ?: ByteArray(0))
-                    } catch (e: Exception) {
-                        false
+                    val ctx = t.hexOrNull("ctx") ?: ByteArray(0)
+                    // A malformed *signature* must be rejected, not raise — that is exactly what the
+                    // null-returning hint decoder and the pre-decode length check exist to provide,
+                    // and most of this file's negative cases are aimed at it. So the throw is only
+                    // tolerated where it is a caller error the caller can see coming: a context over
+                    // 255 bytes, or a wrong-length public key. Catching everything instead would let
+                    // an implementation that raised on a hostile signature pass every invalid case.
+                    val callerError = ctx.size > 255 || pk.size != dsa.publicKeyLen
+                    val valid = if (callerError) {
+                        try {
+                            dsa.verify(t.hex("sig"), t.hex("msg"), pk, ctx)
+                        } catch (e: Exception) {
+                            false
+                        }
+                    } else {
+                        dsa.verify(t.hex("sig"), t.hex("msg"), pk, ctx)
                     }
                     Check.eq(valid, t.isValid(), "$at verdict")
                 }

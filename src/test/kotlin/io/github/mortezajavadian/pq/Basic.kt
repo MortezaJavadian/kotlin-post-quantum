@@ -28,10 +28,13 @@ import io.github.mortezajavadian.pq.testing.suite
  * `ML-KEM wipes generated randomness when encapsulation throws` and `ML-DSA prepares and cleans
  * entropy before secret expansion` both work by replacing `crypto.getRandomValues` and inspecting the
  * array the implementation was handed. `Bytes.random` owns a private `SecureRandom` and there is no
- * such seam here, so the property those cases assert — that generated randomness does not survive an
- * error path — is structural in this port instead: `keygen()` and `encapsulate(publicKey)` wipe in a
- * `finally`. Adding an injectable RNG purely to observe it would be a change to the library, not to
- * its tests, so it is left as a stated gap.
+ * such seam here, so the half of each property that needs the seam — that generated randomness does
+ * not survive an error path — is structural in this port instead: `keygen()`, `encapsulate(publicKey)`
+ * and `signInternal` all wipe what they generated before rethrowing. Adding an injectable RNG purely
+ * to observe it would be a change to the library, not to its tests, so that half is left as a stated
+ * gap. The half that needs no seam *is* tested, by `ML-DSA validates entropy before it expands the
+ * key`: the guard order those cases pin is observable from outside, because with both a bad `rnd` and
+ * a bad key it decides which of the two errors the caller sees.
  */
 internal val basicSuite: Suite = suite("basic") {
 
@@ -251,6 +254,35 @@ internal val basicSuite: Suite = suite("basic") {
                     kem.decapsulate(ByteArray(size), keys.secretKey)
                 }
             }
+
+            // K-PKE is exposed, so it is checked too — and it is the layer where a missing guard is
+            // worst, because the coins are the ciphertext's only entropy: with predictable coins
+            // anyone holding `ek` recomputes r̂, e₁, e₂ and reads the plaintext back out.
+            val kpke = kem.kpkeKeygen(Bytes.random(32))
+            val coins = ByteArray(32) { 2 }
+            for (size in listOf(0, 31, 33, 64)) {
+                Check.throwsWith("seed", "$at kpkeEncrypt seed of $size bytes") {
+                    kem.kpkeEncrypt(kpke.publicKey, msg, ByteArray(size))
+                }
+            }
+            val ct = kem.kpkeEncrypt(kpke.publicKey, msg, coins)
+            Check.eq(kem.kpkeDecrypt(ct, kpke.secretKey), msg, "$at K-PKE round trip")
+            for (size in listOf(0, ct.size - 1, ct.size + 1)) {
+                Check.throwsWith("cipherText", "$at kpkeDecrypt cipherText of $size bytes") {
+                    kem.kpkeDecrypt(ByteArray(size), kpke.secretKey)
+                }
+            }
+            for (size in listOf(0, kem.kpkeSecretKeyLen - 1, kem.kpkeSecretKeyLen + 1)) {
+                Check.throwsWith("secretKey", "$at kpkeDecrypt secretKey of $size bytes") {
+                    kem.kpkeDecrypt(ct, ByteArray(size))
+                }
+            }
+            // The full ML-KEM secret key is the second legal width: decapsulate passes it through.
+            Check.eq(
+                kem.kpkeDecrypt(ct, ByteArray(kem.secretKeyLen).also { kpke.secretKey.copyInto(it) }),
+                msg,
+                "$at kpkeDecrypt accepts the full secretKey",
+            )
         }
     }
 
@@ -437,6 +469,39 @@ internal val basicSuite: Suite = suite("basic") {
                 Check.throwsWith("extraEntropy", "$at extraEntropy of $size bytes") {
                     dsa.sign(msg, keys.secretKey, Bytes.EMPTY, ByteArray(size))
                 }
+            }
+        }
+    }
+
+    /**
+     * The order of the two guards at the top of `signInternal`, which is the half of the reference's
+     * `ML-DSA prepares and cleans entropy before secret expansion` that needs no RNG seam.
+     *
+     * Given *both* a bad `rnd` and a bad secret key, the `rnd` error has to win. Not because the
+     * message is nicer, but because the alternative means the key was already decoded and
+     * NTT-expanded before anything was checked — 23 secret polynomials plus ρ, K, tr and µ live in the
+     * heap on a path that then throws, with no `finally` to reach them. An implementation that
+     * validated in the convenient order passes every vector in this repository and fails only here.
+     */
+    test("ML-DSA validates entropy before it expands the key") {
+        val bad = ByteArray(31)
+        for ((level, dsa) in Params.dsaLevels) {
+            val at = "ML-DSA-$level"
+            Check.throwsWith("extraEntropy", "$at empty secretKey and short extraEntropy") {
+                dsa.signInternal(byteArrayOf(1), Bytes.EMPTY, bad)
+            }
+            // And with valid entropy the key error is still reported, not swallowed.
+            Check.throwsWith("secretKey", "$at empty secretKey with valid extraEntropy") {
+                dsa.signInternal(byteArrayOf(1), Bytes.EMPTY, ByteArray(32))
+            }
+        }
+        // Same again for a key of the right length whose `s1` does not decode — the η = 2 levels only,
+        // for the reason given under "ML-DSA rejects a malformed secret key".
+        for ((level, dsa) in listOf("44" to Params.mlDsa44, "87" to Params.mlDsa87)) {
+            val malformed = ByteArray(dsa.secretKeyLen)
+            malformed[32 + 32 + 64] = 7
+            Check.throwsWith("extraEntropy", "ML-DSA-$level malformed secretKey and short extraEntropy") {
+                dsa.signInternal(byteArrayOf(1), malformed, bad)
             }
         }
     }

@@ -130,7 +130,7 @@ use them only if you are implementing that interface yourself.
 ### K-PKE: the layer under the KEM
 
 ```kotlin
-val keys = kem.kpkeKeygen(seed)                                   // 64-byte seed
+val keys = kem.kpkeKeygen(seed)                                   // 32-byte seed
 val ct = kem.kpkeEncrypt(keys.publicKey, plaintext32, coins32)    // caller supplies the coins
 val pt = kem.kpkeDecrypt(ct, keys.secretKey)
 ```

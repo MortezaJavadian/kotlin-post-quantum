@@ -491,7 +491,21 @@ internal class MlDsa(
         secretKey: ByteArray,
         extraEntropy: ByteArray? = null,
     ): ByteArray {
-        val sk = decodeSecretKey(secretKey)
+        // Entropy is prepared *before* the key is touched, and the order is deliberate: both
+        // `Bytes.random` and the `extraEntropy` length check can throw, and neither must leave an
+        // expanded copy of a private key behind. Getting it the other way round means a caller who
+        // passes 31 bytes — or an environment whose CSPRNG fails — strands ρ, K, tr, µ and 23
+        // NTT-domain secret polynomials in the heap. The reference orders it the same way for the
+        // same reason, and pins it in `ML-DSA prepares and cleans entropy before secret expansion`.
+        val rnd = extraEntropy ?: Bytes.random(32)
+        val sk = try {
+            Bytes.requireSize(rnd, 32, "extraEntropy")
+            decodeSecretKey(secretKey)
+        } catch (e: Throwable) {
+            // Only randomness this function generated is wiped; a caller's array stays the caller's.
+            if (extraEntropy == null) Bytes.clean(rnd)
+            throw e
+        }
 
         // A ← ExpandA(ρ), cached whole: the loop below may re-run and must not resample it.
         val a = Array(k) { arrayOfNulls<IntArray>(l) }
@@ -510,8 +524,6 @@ internal class MlDsa(
 
         // µ ← H(tr || M, 512)
         val mu = Sha3.shake256(crhBytes).update(sk.tr).update(msg).digest()
-        val rnd = extraEntropy ?: Bytes.random(32)
-        Bytes.requireSize(rnd, 32, "extraEntropy")
         // ρ′ ← H(K || rnd || µ, 512)
         val rhoPrime = Sha3.shake256(crhBytes).update(sk.bigK).update(rnd).update(mu).digest()
         if (extraEntropy == null) Bytes.clean(rnd)
@@ -561,14 +573,24 @@ internal class MlDsa(
                 val h = arrayOfNulls<IntArray>(k)
                 for (i in 0 until k) {
                     // r0 ← LowBits(w − ⟨⟨c·s2⟩⟩)
+                    //
+                    // `cs2` is `c·s2` and `ct0` is `c·t0` with `c` public — a verifier recomputes it
+                    // from the signature's own c̃ — and a sparse ±1 challenge is invertible, so a
+                    // surviving copy of either is the secret it was multiplied by. Both are wiped the
+                    // moment they are dead, on every one of the three exits below as well as the fall
+                    // through, because this loop runs about 4.25 times per signature and an abandoned
+                    // array is readable until the collector happens to reuse the page.
                     val cs2 = DilithiumRing.nttDecode(multiplyNtt(sk.s2[i], cHat))
                     val r0 = polySub(w[i], cs2).let { diff -> IntArray(n) { lowBits(diff[it]) } }
+                    Bytes.cleanPolys(cs2)
                     if (polyChknorm(r0, gamma2 - beta)) {
+                        Bytes.cleanPolys(r0)
                         reject = true
                         break
                     }
                     val ct0 = DilithiumRing.nttDecode(multiplyNtt(sk.t0[i], cHat))
                     if (polyChknorm(ct0, gamma2)) {
+                        Bytes.cleanPolys(r0, ct0)
                         reject = true
                         break
                     }
@@ -581,6 +603,7 @@ internal class MlDsa(
                         count += bit
                     }
                     h[i] = hi
+                    Bytes.cleanPolys(r0, ct0)
                 }
                 // The number of set hint bits must fit the ω budget the encoding allows.
                 if (!reject && count <= omega) {
@@ -598,6 +621,9 @@ internal class MlDsa(
                     for (row in matrix) Bytes.cleanPolys(*row)
                     return signature
                 }
+                // A hint row is `MakeHint` over secret-derived material; the rows already filled are
+                // wiped whether the row loop broke early or the ω budget overflowed.
+                for (row in h) if (row != null) Bytes.cleanPolys(row)
             }
             Bytes.clean(cTilde, w1Encoded)
             Bytes.cleanPolys(cHat)

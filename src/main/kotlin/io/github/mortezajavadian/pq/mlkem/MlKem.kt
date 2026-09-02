@@ -318,6 +318,12 @@ internal class MlKem(
     fun kpkeEncrypt(publicKey: ByteArray, msg: ByteArray, seed: ByteArray): ByteArray {
         Bytes.requireSize(publicKey, publicKeyLen, "publicKey")
         Bytes.requireSize(msg, 32, "message")
+        // FIPS-203 Algorithm 14 fixes `r ∈ B³²`, and SHAKE would absorb any width without complaint,
+        // so this is the one input whose misuse is otherwise silent: a short or empty seed still
+        // produces a well-formed ciphertext, and one an attacker holding `ek` can reproduce — which
+        // recovers the plaintext. The reference never has to state the width because it does not
+        // expose this function; here it is reachable, so it is checked.
+        Bytes.requireSize(seed, 32, "seed")
         val tHat = poly12.decodeVec(publicKey, 0, k)
         val rho = publicKey.copyOfRange(k * poly12.bytesLen, publicKeyLen)
 
@@ -365,6 +371,15 @@ internal class MlKem(
      * or `⌈q/2⌉` it is nearer, so a small perturbation cannot change the recovered bit.
      */
     fun kpkeDecrypt(cipherText: ByteArray, secretKey: ByteArray): ByteArray {
+        Bytes.requireSize(cipherText, cipherTextLen, "cipherText")
+        // Two widths are legal because two callers are: a K-PKE caller passes `dkPKE` alone, while
+        // [decapsulate] passes the whole ML-KEM secret key and this reads its leading `384k` bytes.
+        // Anything else would otherwise reach the bit packer and surface as an index-out-of-bounds
+        // from inside a coder — and a *longer* ciphertext would be accepted with its tail ignored,
+        // which makes the encoding non-canonical for anyone comparing or deduplicating by bytes.
+        Bytes.require(secretKey.size == kpkeSecretKeyLen || secretKey.size == secretKeyLen) {
+            "secretKey: expected $kpkeSecretKeyLen or $secretKeyLen bytes, got ${secretKey.size}"
+        }
         val u = polyU.decodeVec(cipherText, 0, k)
         val v = polyV.decode(cipherText, k * polyU.bytesLen)
         val sHat = poly12.decodeVec(secretKey, 0, k)
