@@ -1,0 +1,155 @@
+name: Publish
+
+# Tag-triggered, because a tag is the one thing in this repository that already means "this exact tree
+# is the release". Pushing `v0.1.0` runs the whole test suite first and uploads a signed deployment to
+# Maven Central only if it is green.
+#
+# The secrets this needs, and where each comes from, are listed on the Publish step below.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Release the deployment on Central as well as uploading it (IRREVERSIBLE)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never cancel a publish in flight: a cancelled upload can leave a half-written deployment on the
+# Portal that then has to be dropped by hand.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  # The gate. The same file CI runs, so "the tests passed" means the same thing in both places.
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  publish:
+    name: Upload to Maven Central
+    # Nothing below runs unless every test in the job above is green.
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Uncomment after creating an Environment named maven-central under Settings → Environments; the
+    # four secrets can then live there instead of at repository scope. Adding yourself as a required
+    # reviewer on it makes every publish wait for your approval — the same arrangement as you holding
+    # the commits: the machine prepares, you press the button.
+    # environment: maven-central
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Check the tag names the declared version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          declared="$(sed -n 's/^version = "\(.*\)"$/\1/p' build.gradle.kts)"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "build.gradle.kts: $declared"
+          echo "tag:              $GITHUB_REF_NAME"
+          if [ "$declared" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not name version $declared — nothing published"
+            exit 1
+          fi
+
+      - name: Check the version is not already on Central
+        # A released version is permanent: it can never be re-uploaded, corrected or withdrawn. Better
+        # to learn that here, in two seconds, than from a Gradle stack trace after the tests have run.
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' build.gradle.kts)"
+          base=https://repo1.maven.org/maven2/io/github/mortezajavadian/kotlin-post-quantum
+          # `|| code=000` and not `|| echo 000`: curl writes %{http_code} even when it fails, so a
+          # fallback inside the substitution would append to it and produce "000000".
+          code="$(curl -sS -o /dev/null -w '%{http_code}' "$base/$v/kotlin-post-quantum-$v.pom")" || code=000
+          case "$code" in
+            404) echo "$v is not on Central yet" ;;
+            200) echo "::error::$v is already released on Central, and that is permanent — bump the version"
+                 exit 1 ;;
+            *)   echo "::warning::could not reach Central to check (HTTP $code); continuing" ;;
+          esac
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Check the secrets are present
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          # Emptiness only. No value is printed, and GitHub would mask it anyway.
+          missing=0
+          for name in MAVEN_CENTRAL_USERNAME MAVEN_CENTRAL_PASSWORD SIGNING_KEY SIGNING_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::repository secret $name is not set"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+
+      - name: Publish
+        env:
+          # com.vanniktech.maven.publish reads Gradle properties, and ORG_GRADLE_PROJECT_<name> is how
+          # Gradle takes a property from the environment. That indirection is the whole reason none of
+          # these five values has to exist anywhere in the repository.
+          #
+          #   MAVEN_CENTRAL_USERNAME / _PASSWORD  a Central Portal *user token*, not the account login
+          #                                       (central.sonatype.com → Account → Generate User Token)
+          #   SIGNING_KEY                         `gpg --armor --export-secret-keys <keyId>`, whole
+          #                                       block including the BEGIN/END lines
+          #   SIGNING_KEY_ID                      the 8-character key id; optional, and only needed to
+          #                                       pick one subkey out of several
+          #   SIGNING_PASSWORD                    the passphrase on that key
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          # publishToMavenCentral uploads and stops; the deployment then waits on the Portal until you
+          # press Publish. publishAndReleaseToMavenCentral does both, and what it does cannot be undone
+          # — so the irreversible one is opt-in per run, and a tag push never takes it.
+          if [ "$RELEASE" = "true" ]; then
+            task=publishAndReleaseToMavenCentral
+          else
+            task=publishToMavenCentral
+          fi
+          echo "running $task"
+          ./gradlew --stacktrace "$task"
+
+      - name: Summarise
+        if: always()
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' build.gradle.kts)"
+          {
+            echo "### kotlin-post-quantum $v"
+            echo
+            if [ "$RELEASE" = "true" ]; then
+              echo "Uploaded **and released**. It shows up in Central search within ~10 minutes and on repo1 within ~30."
+            else
+              echo "Uploaded as a deployment. Open <https://central.sonatype.com/publishing/deployments> and press **Publish** to release it, or **Drop** to throw it away."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+

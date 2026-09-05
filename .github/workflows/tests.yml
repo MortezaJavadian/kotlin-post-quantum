@@ -1,0 +1,115 @@
+name: Tests
+
+# The single definition of "the tests". ci.yml calls it on every push and pull request; publish.yml
+# calls it as the gate in front of a Maven Central upload. It lives in its own file rather than being
+# copied into both, because a publish gate that has drifted from CI is a gate that lets through
+# exactly what CI would have caught.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: JDK 17 · ubuntu-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        # `shell: bash` is not the same as the default shell: it adds `-o pipefail`, without which a
+        # failing ./gradlew piped into `tee` would report the exit status of `tee` and turn a red run
+        # green. In a suite whose worst failure mode is passing, that is not a detail.
+        shell: bash
+
+    env:
+      # A missing vector file is SKIPPED by default and FAILED with this set. The suite exists to
+      # prove agreement with NIST and Wycheproof, so a run that quietly passed over their files has
+      # proven nothing — README.md names this as the CI setting for exactly that reason.
+      PQ_REQUIRE_VECTORS: '1'
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          # The build declares jvmToolchain(17) and settings.gradle.kts registers no toolchain
+          # resolver, so 17 has to be present on the runner rather than downloadable. Java 8 bytecode
+          # is still what comes out, via jvmTarget = JVM_1_8 and -Xjdk-release=1.8.
+          java-version: '17'
+          # Deliberately no `cache: gradle` here — setup-gradle below owns the Gradle caches, and two
+          # actions writing the same directories is how a corrupt cache happens.
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        # Also validates gradle-wrapper.jar against the checksums Gradle publishes (validate-wrappers
+        # defaults to true), so the committed wrapper cannot be swapped for a modified one unnoticed.
+        # That is why there is no separate gradle/actions/wrapper-validation step.
+
+      - name: Read the vector pin
+        id: vectors
+        run: |
+          pin="$(sed -n 's/^PIN="\([0-9a-f]\{40\}\)"$/\1/p' scripts/fetch-vectors.sh)"
+          if [ -z "$pin" ]; then
+            echo "::error::could not read PIN out of scripts/fetch-vectors.sh"
+            exit 1
+          fi
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached vectors
+        uses: actions/cache@v6
+        with:
+          path: test-vectors
+          # Keyed on the pin itself, read out of the script one step ago, so bumping PIN mints a new
+          # cache instead of serving the old vectors under a new commit. No restore-keys on purpose:
+          # a near-miss here would mean testing against the wrong NIST files, which is worse than a
+          # slow run.
+          key: test-vectors-${{ steps.vectors.outputs.pin }}
+
+      - name: Fetch the vectors
+        # Runs whether the cache hit or missed. The script reuses an existing checkout and then
+        # re-verifies that HEAD is the pin, exiting non-zero when it is not — which is what makes a
+        # restored directory safe to use: it is a starting point, never proof.
+        run: ./scripts/fetch-vectors.sh
+
+      - name: Build and test — JUnit 5 front end
+        # `build` is assemble + check, so this also proves that the jar, sources jar and javadoc jar
+        # the publish job signs actually assemble — before a tag exists, not after.
+        run: ./gradlew --stacktrace build
+
+      - name: Test — main() front end
+        # The same suites, cases and assertions through the standalone runner, which additionally
+        # prints per-case assertion counts and the whole passed-over table. Two front ends over one
+        # body of cases can only disagree if the harness itself is broken.
+        run: ./gradlew --stacktrace vectors | tee vectors.log
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '### Vector suite'
+            echo
+            echo '```'
+            grep -E '[0-9]+ passed, [0-9]+ failed, [0-9]+ skipped' vectors.log \
+              || echo 'no summary line — the run did not reach it'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            build/reports/tests/test
+            build/test-results/test
+            vectors.log
+          retention-days: 14
+          if-no-files-found: warn
+
+

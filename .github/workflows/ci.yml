@@ -1,0 +1,22 @@
+name: CI
+
+# Every push to main and every pull request, whatever it touches. The job body is in tests.yml, which
+# publish.yml calls as well, so there is exactly one definition of what "green" means here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch or pull request makes the older run's answer irrelevant, so cancel
+# it. Deliberately not done in publish.yml, where a cancelled run can leave half a deployment behind.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
